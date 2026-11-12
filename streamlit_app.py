@@ -2,6 +2,9 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, r2_score
 
 # ---------- Sayfa ayarları ----------
 st.set_page_config(page_title="B2B Kitap Dağıtım Paneli", page_icon="📚", layout="wide")
@@ -31,6 +34,14 @@ SINIF_RENK = {"A": LACIVERT, "B": TURKUAZ, "C": GRI}
 AY_ADLARI = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
              "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
 GUN_ADLARI = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+
+# Tahmin modeli için özel dönemler
+PANDEMI_BAS, PANDEMI_BIT = pd.Timestamp("2020-03-16"), pd.Timestamp("2020-05-31")
+# Resmi tatiller + Temmuz sonu kapanışı (veride bu hafta içi günlerde satış yok)
+TATILLER = pd.to_datetime([
+    "2020-01-01", "2020-04-23", "2020-05-01", "2020-05-19", "2020-05-24", "2020-05-25", "2020-05-26",
+    "2020-07-15", "2020-10-29", "2021-01-01",
+]).append(pd.date_range("2020-07-20", "2020-08-03"))
 
 
 # ---------- Yardımcı fonksiyonlar ----------
@@ -114,6 +125,43 @@ def abc_hesapla(veri, a_siniri=80, b_siniri=95):
     onceki_pay = urun["KumulatifPay"].shift(fill_value=0)
     urun["Sinif"] = np.select([onceki_pay < a_siniri, onceki_pay < b_siniri], ["A", "B"], default="C")
     return urun
+
+
+def ozellikler(tarihler, baslangic_gunu):
+    """Regresyonun açıklayıcı değişkenleri: trend, haftanın günü, pandemi ve tatil"""
+    X = pd.DataFrame(index=tarihler)
+    X["Trend"] = (tarihler - baslangic_gunu).days
+    for i, gun in enumerate(GUN_ADLARI[1:], start=1):  # Pazartesi referans gün
+        X[gun] = (tarihler.dayofweek == i).astype(int)
+    X["Pandemi"] = ((tarihler >= PANDEMI_BAS) & (tarihler <= PANDEMI_BIT)).astype(int)
+    X["Tatil"] = tarihler.isin(TATILLER).astype(int)
+    return X
+
+
+def tahmin_yap(veri, son_tarih, ufuk=30):
+    """Günlük ciroyu çoklu doğrusal regresyonla modelleyip sonraki 'ufuk' günü tahmin eder"""
+    gunluk = veri.groupby("InvoiceDate")["Revenue"].sum()
+    takvim = pd.date_range(gunluk.index.min(), son_tarih)
+    y = gunluk.reindex(takvim, fill_value=0)  # satış olmayan günler 0
+    X = ozellikler(takvim, takvim[0])
+
+    model = LinearRegression().fit(X, y)
+    uyum = model.predict(X)
+
+    gelecek = pd.date_range(son_tarih + pd.Timedelta(days=1), periods=ufuk)
+    tahmin = np.clip(model.predict(ozellikler(gelecek, takvim[0])), 0, None)
+    hata_std = np.std(y - uyum)
+
+    gecmis = pd.DataFrame({"Tarih": takvim, "Gerçek": y.values, "Model": uyum})
+    ileri = pd.DataFrame({
+        "Tarih": gelecek,
+        "Tahmin": tahmin,
+        "Alt": np.clip(tahmin - 1.96 * hata_std, 0, None),
+        "Üst": tahmin + 1.96 * hata_std,
+    })
+    katsayilar = pd.Series(model.coef_, index=X.columns)
+    olcum = {"r2": r2_score(y, uyum), "mae": mean_absolute_error(y, uyum)}
+    return gecmis, ileri, katsayilar, olcum
 
 
 def degisim(son, onceki):
@@ -358,6 +406,81 @@ with tab_satis:
             "MusteriBasina": st.column_config.NumberColumn("Müşteri Başına Ciro (₺)", format="localized"),
         },
     )
+
+    # ================= Ciro tahmini =================
+    st.divider()
+    st.subheader("Önümüzdeki 30 Günün Ciro Tahmini")
+    st.caption("Çoklu doğrusal regresyon: günlük ciro ~ trend + haftanın günü + pandemi dönemi + tatil günleri")
+
+    if dff["InvoiceDate"].nunique() < 60:
+        st.info("Tahmin için en az 60 günlük veri gerekiyor. Tarih aralığını genişletin.")
+    else:
+        gecmis, ileri, katsayilar, olcum = tahmin_yap(dff, bitis)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("30 Günlük Tahmini Ciro", tl(ileri["Tahmin"].sum()))
+        c2.metric("Son 30 Günün Gerçek Cirosu", tl(gecmis["Gerçek"].tail(30).sum()))
+        c3.metric("Modelin Açıklama Gücü (R²)", f"{olcum['r2']:.2f}".replace(".", ","))
+        c4.metric("Ortalama Günlük Hata", tl(olcum["mae"]))
+
+        # Son 120 gün + tahmin, okunaklı olsun diye
+        gorunen = gecmis.tail(120)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=gorunen["Tarih"], y=gorunen["Gerçek"], name="Gerçekleşen",
+                                 line=dict(color=GRI, width=1.5),
+                                 hovertemplate="%{x|%d.%m.%Y}: %{y:,.0f} ₺<extra>Gerçekleşen</extra>"))
+        fig.add_trace(go.Scatter(x=gorunen["Tarih"], y=gorunen["Model"], name="Model",
+                                 line=dict(color=LACIVERT, width=1.5),
+                                 hovertemplate="%{x|%d.%m.%Y}: %{y:,.0f} ₺<extra>Model</extra>"))
+        fig.add_trace(go.Scatter(x=pd.concat([ileri["Tarih"], ileri["Tarih"][::-1]]),
+                                 y=pd.concat([ileri["Üst"], ileri["Alt"][::-1]]),
+                                 fill="toself", fillcolor="rgba(20,163,163,0.15)", line=dict(width=0),
+                                 name="%95 aralık", hoverinfo="skip"))
+        fig.add_trace(go.Scatter(x=ileri["Tarih"], y=ileri["Tahmin"], name="Tahmin",
+                                 line=dict(color=TURKUAZ, width=2.5, dash="dash"),
+                                 hovertemplate="%{x|%d.%m.%Y}: %{y:,.0f} ₺<extra>Tahmin</extra>"))
+        fig.update_yaxes(tickformat=",.0f")
+        fig = grafik_duzenle(fig, yukseklik=420)
+        fig.update_layout(title="Günlük Ciro: Son 120 Gün ve Tahmin", showlegend=True,
+                          legend=dict(orientation="h", y=-0.15, title=None))
+        st.plotly_chart(fig)
+
+        with st.container(border=True):
+            st.markdown("**💡 Model ne söylüyor?**")
+            st.markdown(
+                f"- Önümüzdeki 30 günde toplam **{tl(ileri['Tahmin'].sum())}** ciro bekleniyor "
+                f"(günlük ortalama {tl(ileri['Tahmin'].mean())})."
+            )
+            st.markdown(
+                f"- Diğer koşullar aynıyken ciro her ay yaklaşık **{tl(katsayilar['Trend'] * 30)}** "
+                f"{'artma' if katsayilar['Trend'] > 0 else 'azalma'} eğiliminde."
+            )
+            if gecmis["Tarih"].min() <= PANDEMI_BAS and gecmis["Tarih"].max() >= PANDEMI_BIT:
+                st.markdown(
+                    f"- Pandemi kapanması (16 Mart – 31 Mayıs) günlük ciroyu ortalama "
+                    f"**{tl(abs(katsayilar['Pandemi']))}** {'düşürmüş' if katsayilar['Pandemi'] < 0 else 'artırmış'}."
+                )
+            st.markdown(
+                f"- Pazartesi'ye göre Cumartesi günleri ortalama {tl(abs(katsayilar['Cumartesi']))}, "
+                f"Pazar günleri {tl(abs(katsayilar['Pazar']))} daha az satış yapılıyor. "
+                f"Sevkiyat ve depo personeli planı hafta başına ağırlık vermeli."
+            )
+
+        with st.expander("Model detayları"):
+            st.markdown(
+                """
+Satış olmayan günler (hafta sonları, tatiller) 0 ciro olarak modele dahil edildi. Değişkenler:
+- **Trend:** Veri başlangıcından bu yana geçen gün sayısı
+- **Haftanın günü:** Salı–Pazar için 0/1 kukla değişkenler (Pazartesi referans)
+- **Pandemi:** 16 Mart – 31 Mayıs 2020 arası 1, diğer günler 0
+- **Tatil:** Resmi tatiller ve 20 Temmuz – 3 Ağustos kapanışı için 1
+
+Gölgeli alan, modelin hatalarının standart sapmasına göre hesaplanan yaklaşık %95 aralığıdır.
+"""
+            )
+            tablo = katsayilar.rename("Katsayı (₺/gün)").reset_index().rename(columns={"index": "Değişken"})
+            st.dataframe(tablo, hide_index=True,
+                         column_config={"Katsayı (₺/gün)": st.column_config.NumberColumn(format="localized")})
 
 with tab_pazarlama:
     referans = bitis + pd.Timedelta(days=1)
