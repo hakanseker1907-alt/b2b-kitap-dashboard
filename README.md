@@ -10,6 +10,8 @@ Grup üyeleri
 Hakan ŞEKER– 070220326
 Yiğitkan Doğan – 070220269
 Ahmet Hazineli - 
+Nursel İlgün
+Jalil Nazarli
 
 Dosya	Açıklama
 streamlit_app.py	Dashboard'un kaynak kodu
