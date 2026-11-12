@@ -9,6 +9,8 @@ Canlı dashboard: https://b2b-kitap-paneli.streamlit.app/
 Grup üyeleri
 Hakan ŞEKER– 070220326
 Yiğitkan Doğan – 070220269
+Ahmet Hazineli - 
+
 Dosya	Açıklama
 streamlit_app.py	Dashboard'un kaynak kodu
 veri_hazirlama.ipynb	Veri temizleme adımları (Jupyter)
