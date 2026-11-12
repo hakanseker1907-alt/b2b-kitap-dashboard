@@ -21,6 +21,7 @@ TURKUAZ = "#14A3A3"
 GRI = "#9AA5B1"
 AY_ADLARI = ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
              "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"]
+GUN_ADLARI = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
 
 
 # ---------- Yardımcı fonksiyonlar ----------
@@ -198,7 +199,113 @@ with tab_genel:
         st.dataframe(rapor.rename("Değer"))
 
 with tab_satis:
-    st.info("Bu sekme hazırlanıyor.")
+    # --- Hesaplamalar ---
+    musteri = dff.groupby("CustomerID")["Revenue"].sum().sort_values(ascending=False)
+    ilk10 = (musteri / musteri.sum() * 100).head(10).reset_index()
+    ilk10.columns = ["Müşteri", "Pay"]
+    ilk10["Ciro"] = musteri.head(10).values
+
+    # Önce her günün cirosu, sonra haftanın gününe göre ortalaması
+    gunluk = dff.groupby(dff["InvoiceDate"].dt.date)["Revenue"].sum().reset_index()
+    gunluk.columns = ["Tarih", "Ciro"]
+    gunluk["Gün"] = pd.to_datetime(gunluk["Tarih"]).dt.dayofweek
+    gun_ort = gunluk.groupby("Gün")["Ciro"].mean().reset_index()
+    gun_ort["Gün Adı"] = gun_ort["Gün"].apply(lambda g: GUN_ADLARI[g])
+    en_guclu_gun = gun_ort.loc[gun_ort["Ciro"].idxmax()]
+
+    sehir_tablo = (
+        bilinen.groupby("City")
+        .agg(Ciro=("Revenue", "sum"), Musteri=("CustomerID", "nunique"), Fatura=("InvoiceNo", "nunique"))
+        .sort_values("Ciro", ascending=False)
+    )
+    sehir_tablo["Pay"] = sehir_tablo["Ciro"] / sehir_tablo["Ciro"].sum() * 100
+    sehir_tablo["MusteriBasina"] = sehir_tablo["Ciro"] / sehir_tablo["Musteri"]
+
+    # --- KPI kartları ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("İlk 10 Müşterinin Payı", yuzde(ilk10["Pay"].sum()))
+    c2.metric("En Güçlü Gün", en_guclu_gun["Gün Adı"])
+    c3.metric("Müşteri Başına Ciro", tl(musteri.mean()))
+    c4.metric("Satış Yapılan Şehir", adet(len(sehir_tablo)))
+
+    # --- En büyük müşteriler ve haftanın günleri (yan yana) ---
+    sol, sag = st.columns(2)
+
+    fig = px.bar(ilk10, x="Ciro", y="Müşteri", orientation="h", title="En Büyük 10 Müşteri",
+                 custom_data=["Pay"])
+    fig.update_traces(marker_color=LACIVERT,
+                      hovertemplate="%{y}: %{x:,.0f} ₺ (pay %{customdata[0]:.1f}%)<extra></extra>")
+    fig.update_yaxes(title=None, autorange="reversed")
+    fig.update_xaxes(title=None, tickformat=",.0f")
+    sol.plotly_chart(grafik_duzenle(fig))
+
+    fig = px.bar(gun_ort, x="Gün Adı", y="Ciro", title="Haftanın Günlerine Göre Ortalama Günlük Ciro")
+    fig.update_traces(marker_color=TURKUAZ, hovertemplate="%{x}: %{y:,.0f} ₺<extra></extra>")
+    fig.update_yaxes(title=None, tickformat=",.0f")
+    fig.update_xaxes(title=None)
+    sag.plotly_chart(grafik_duzenle(fig))
+
+    # --- Kategori x ay ısı haritası (ilk 10 kategori) ---
+    ilk10_kat = kat.head(10).index
+    isi = (
+        dff[dff["Category"].isin(ilk10_kat)]
+        .pivot_table(index="Category", columns="Month", values="Revenue", aggfunc="sum", fill_value=0)
+        .reindex(ilk10_kat)
+    )
+    isi.columns = [AY_ADLARI[a - 1] for a in isi.columns]
+    fig = px.imshow(isi, aspect="auto", title="İlk 10 Kategorinin Aylık Cirosu",
+                    color_continuous_scale=["#FFFFFF", TURKUAZ, LACIVERT])
+    fig.update_traces(hovertemplate="%{y} · %{x}: %{z:,.0f} ₺<extra></extra>")
+    fig.update_xaxes(title=None, side="top")
+    fig.update_yaxes(title=None)
+    fig = grafik_duzenle(fig, yukseklik=420)
+    fig.update_layout(coloraxis_showscale=False)
+    st.plotly_chart(fig)
+
+    # --- Öne çıkanlar ---
+    with st.container(border=True):
+        st.markdown("**💡 Öne çıkanlar**")
+        notlar = [
+            f"Cironun {yuzde(ilk10['Pay'].sum(), 0)} kadarı yalnızca 10 müşteriden geliyor. "
+            f"En büyük müşteri **{ilk10.iloc[0]['Müşteri']}** tek başına {yuzde(ilk10.iloc[0]['Pay'])} paya sahip.",
+        ]
+        hafta_sonu = gun_ort[gun_ort["Gün"] >= 5]["Ciro"].mean()
+        if pd.notna(hafta_sonu) and hafta_sonu > 0:
+            notlar.append(
+                f"**{en_guclu_gun['Gün Adı']}** günleri ortalama {tl(en_guclu_gun['Ciro'])} satış yapılıyor; "
+                f"bu, hafta sonu ortalamasının yaklaşık {en_guclu_gun['Ciro'] / hafta_sonu:.0f} katı."
+            )
+        if isi.shape[1] > 1:
+            zirve = isi.idxmax(axis=1).value_counts()
+            notlar.append(
+                f"İlk 10 kategoriden {zirve.iloc[0]} tanesi en yüksek cirosunu **{zirve.index[0]}** ayında yapıyor."
+            )
+        buyuk_sehirler = sehir_tablo[sehir_tablo["Musteri"] >= 5]
+        if not buyuk_sehirler.empty:
+            en_verimli = buyuk_sehirler["MusteriBasina"].idxmax()
+            notlar.append(
+                f"En az 5 müşterisi olan şehirler arasında müşteri başına ciroda **{en_verimli}** önde "
+                f"({tl(buyuk_sehirler.loc[en_verimli, 'MusteriBasina'])})."
+            )
+        for n in notlar:
+            st.markdown(f"- {n}")
+
+    # --- Şehir detay tablosu ---
+    st.markdown("**Şehir detay tablosu**")
+    st.caption("Sütun başlığına tıklayarak sıralayabilirsiniz. Şehir bilgisi olmayan satışlar dahil değil.")
+    st.dataframe(
+        sehir_tablo.reset_index()[["City", "Ciro", "Pay", "Musteri", "Fatura", "MusteriBasina"]],
+        hide_index=True,
+        height=350,
+        column_config={
+            "City": "Şehir",
+            "Ciro": st.column_config.NumberColumn("Ciro (₺)", format="localized"),
+            "Pay": st.column_config.NumberColumn("Pay (%)", format="%.1f"),
+            "Musteri": "Müşteri",
+            "Fatura": "Fatura",
+            "MusteriBasina": st.column_config.NumberColumn("Müşteri Başına Ciro (₺)", format="localized"),
+        },
+    )
 
 with tab_pazarlama:
     st.info("Bu sekme hazırlanıyor.")
