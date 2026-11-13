@@ -9,9 +9,9 @@ Canlı dashboard: https://b2b-kitap-paneli.streamlit.app/
 Grup üyeleri
 Hakan ŞEKER– 070220326
 Yiğitkan Doğan – 070220269
-Ahmet Hazineli - 
-Nursel İlgün
-Jalil Nazarli
+Ahmet Hazineli - 070220270
+Nursel İlgün-070240783
+Jalil Nazarli-070210914
 
 Dosya	Açıklama
 streamlit_app.py	Dashboard'un kaynak kodu
